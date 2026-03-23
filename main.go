@@ -41,7 +41,7 @@ import (
 
 var (
 	// Version get dynamically set to git rev by ldflags at build time
-	Version = "0.3.0"
+	Version = "0.4.1"
 
 	debug        = flag.Bool("v", false, "enable verbose output")
 	device       = flag.String("i", "eth0", "default interface to bind services on")
@@ -121,7 +121,6 @@ func main() {
 
 	r.Handle("/service/{vsID}", serviceCreateHandler{ctx}).Methods("PUT")
 	r.Handle("/service/{vsID}/{rsID}", backendCreateHandler{ctx}).Methods("PUT")
-	r.Handle("/service/{vsID}/{rsID}", backendUpdateHandler{ctx}).Methods("PATCH")
 	r.Handle("/service/{vsID}", serviceRemoveHandler{ctx}).Methods("DELETE")
 	r.Handle("/service/{vsID}/{rsID}", backendRemoveHandler{ctx}).Methods("DELETE")
 	r.Handle("/service", serviceListHandler{ctx}).Methods("GET")
