@@ -61,7 +61,7 @@ func (vs *Service) BackendExist(rsID string) bool {
 
 // CreateBackend registers a new backend in the virtual service.
 func (vs *Service) CreateBackend(rsID string, opts *BackendOptions) error {
-	if err := opts.Validate(); err != nil {
+	if err := opts.Validate(vs.options.MaxWeight, vs.options.Port); err != nil {
 		return err
 	}
 
@@ -69,7 +69,7 @@ func (vs *Service) CreateBackend(rsID string, opts *BackendOptions) error {
 		rsID,
 		vs.vsID)
 
-	p, err := pulse.New(opts.host.String(), opts.Port, vs.options.Pulse)
+	p, err := pulse.New(opts.host.String(), vs.options.Port, vs.options.Pulse)
 	if err != nil {
 		return err
 	}

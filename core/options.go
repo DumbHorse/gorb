@@ -57,6 +57,11 @@ type ServiceOptions struct {
 	Protocol   string `json:"protocol" yaml:"protocol"`
 	LbMethod   string `json:"lb_method" yaml:"lb_method"`
 	ShFlags    string `json:"sh_flags" yaml:"sh_flags"`
+	Host     string `json:"host" yaml:"host"`
+	Port     uint16 `json:"port" yaml:"port"`
+	Protocol string `json:"protocol" yaml:"protocol"`
+	LbMethod string `json:"lb_method" yaml:"lb_method"`
+	ShFlags  string `json:"sh_flags" yaml:"sh_flags"`
 	Persistent bool   `json:"persistent" yaml:"persistent"`
 	Fallback   string `json:"fallback" yaml:"fallback"`
 
@@ -196,6 +201,8 @@ func (o *ServiceOptions) CompareStoreOptions(options *ServiceOptions) bool {
 type BackendOptions struct {
 	Host string `json:"host" yaml:"host"`
 	Port uint16 `json:"port" yaml:"port"`
+	// MaxWeight override service MaxWeight
+	MaxWeight int32 `json:"max_weight" yaml:"max_weight"`
 
 	// vsID of backend
 	vsID string
@@ -203,22 +210,28 @@ type BackendOptions struct {
 	host net.IP
 	// Backend current weight
 	weight int32
-	// pulse settings
-	pulse *pulse.Options
 }
 
 // Validate fills missing fields and validates backend configuration.
-func (o *BackendOptions) Validate() error {
-	if len(o.Host) == 0 || o.Port == 0 {
+func (o *BackendOptions) Validate(maxWeight int32, port uint16) error {
+	if len(o.Host) == 0 || port == 0 {
 		return ErrMissingEndpoint
 	}
+	o.Port = port
 
 	if addr, err := net.ResolveIPAddr("ip", o.Host); err == nil {
 		o.host = addr.IP
 	} else {
 		return err
 	}
-
+	if o.MaxWeight == 0 {
+		if maxWeight == 0 {
+			o.MaxWeight = 100
+		} else {
+			o.MaxWeight = maxWeight
+		}
+	}
+	o.weight = o.MaxWeight
 	return nil
 }
 
@@ -226,7 +239,7 @@ func (o *BackendOptions) CompareStoreOptions(options *BackendOptions) bool {
 	if o.Host != options.Host {
 		return false
 	}
-	if o.Port != options.Port {
+	if o.MaxWeight != options.MaxWeight {
 		return false
 	}
 	return true

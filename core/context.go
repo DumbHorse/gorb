@@ -127,7 +127,6 @@ func NewContext(options ContextOptions) (*Context, error) {
 			ctx.disco.Expose("gorb", ctx.endpoint.String(), options.ListenPort)
 		}
 	}
-
 	if err := ctx.ipvs.Init(); err != nil {
 		log.Errorf("unable to initialize IPVS context: %s", err)
 
@@ -189,7 +188,7 @@ func (ctx *Context) GetPoolForService(svc gnl2go.Service) (gnl2go.Pool, error) {
 			return ipvs_pool, nil
 		}
 	}
-	return gnl2go.Pool{}, fmt.Errorf("service doesn't exist\n")
+	return gnl2go.Pool{}, fmt.Errorf("service doesn't exist")
 }
 
 // CreateService registers a new virtual service with IPVS.
@@ -300,7 +299,7 @@ func (ctx *Context) createBackend(vsID, rsID string, opts *BackendOptions) error
 	if vs.BackendExist(rsID) {
 		return fmt.Errorf("%w rsID: %s", ErrObjectExists, rsID)
 	}
-	if err := opts.Validate(); err != nil {
+	if err := opts.Validate(vs.options.MaxWeight, vs.options.Port); err != nil {
 		return err
 	}
 
@@ -333,7 +332,7 @@ func (ctx *Context) createBackend(vsID, rsID string, opts *BackendOptions) error
 		}
 	}
 
-	if skipCreation == false {
+	if !skipCreation {
 		if err := ctx.ipvs.AddDestPort(
 			vs.options.host.String(),
 			vs.options.Port,
@@ -423,7 +422,7 @@ func (ctx *Context) removeService(vsID string) (*ServiceOptions, error) {
 		return nil, fmt.Errorf("%w vsID: %s", ErrObjectNotFound, vsID)
 	}
 
-	if ctx.vipInterface != nil && vs.options.delIfAddr == true {
+	if ctx.vipInterface != nil && vs.options.delIfAddr {
 		ifName := ctx.vipInterface.Attrs().Name
 		vip := &netlink.Addr{IPNet: &net.IPNet{
 			IP: net.ParseIP(vs.options.host.String()), Mask: net.IPv4Mask(255, 255, 255, 255)}}
@@ -543,6 +542,7 @@ func (ctx *Context) GetService(vsID string) (*ServiceInfo, error) {
 type BackendInfo struct {
 	Options *BackendOptions `json:"options"`
 	Metrics pulse.Metrics   `json:"metrics"`
+	Weight  int32           `json:"weight"`
 }
 
 // GetBackend returns information about a backend.
@@ -560,7 +560,7 @@ func (ctx *Context) GetBackend(vsID, rsID string) (*BackendInfo, error) {
 		return nil, fmt.Errorf("%w rsID: %s", ErrObjectNotFound, rsID)
 	}
 
-	return &BackendInfo{rs.options, rs.metrics}, nil
+	return &BackendInfo{rs.options, rs.metrics, rs.options.weight}, nil
 }
 
 // SetStore if external kvstore exists, set store to context
@@ -598,6 +598,7 @@ func (ctx *Context) CompareWith(storeServices map[string]*ServiceConfig) *StoreS
 					log.Debugf("backend %s not found in store", backendName)
 					syncStatus.RemovedBackends = append(syncStatus.RemovedBackends, backendName)
 				} else {
+					storeBackendOptions.Validate(service.options.MaxWeight, service.options.Port)
 					// find updated backends
 					if !backend.options.CompareStoreOptions(storeBackendOptions) {
 						log.Debugf("backend %s is outdated.", backendName)
@@ -662,6 +663,7 @@ func (ctx *Context) Synchronize(storeServicesConfig map[string]*ServiceConfig) e
 					}
 				} else {
 					// find updated backends
+					storeBackendOptions.Validate(service.options.MaxWeight, service.options.Port)
 					if !backend.options.CompareStoreOptions(storeBackendOptions) {
 						log.Debugf("backend [%s/%s] is outdated.", vsID, rsID)
 						if _, err := ctx.removeBackend(vsID, rsID); err != nil {

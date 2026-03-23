@@ -1,3 +1,16 @@
+gorb (0.4.1) unstable; urgency=medium
+
+  * Fix wrong backends weight, Fix metrics
+
+ -- Artem Aleksandrov <aaleksandrov@quantumbrains.com>  Mon, 26 Aug 2023 15:24:00 +0000
+
+gorb (0.4.0) unstable; urgency=medium
+
+  * Core refactor; changed service\backend structure; changed api; External store is in
+    RO mode for gorb now. Added new type of store - file; changed json -> yaml
+
+ -- Artem Aleksandrov <aaleksandrov@quantumbrains.com>  Mon, 26 Aug 2023 15:24:00 +0000
+
 gorb (0.3.0) unstable; urgency=medium
 
   * Support fallback when all backends is dead

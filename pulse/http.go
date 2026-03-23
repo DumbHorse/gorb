@@ -34,7 +34,7 @@ import (
 )
 
 var (
-	errRedirects = errors.New("redirects are not supported for pulse requests")
+	errRedirects = errors.New("stopped after 2 redirects")
 )
 
 type httpPulse struct {
@@ -65,7 +65,10 @@ func newGETDriver(host string, port uint16, opts util.DynamicMap) (Driver, error
 			req *http.Request,
 			via []*http.Request,
 		) error {
-			return errRedirects
+			if len(via) >= 3 {
+				return errRedirects
+			}
+			return nil
 		}}
 		// Do not pass port to Host header
 		if pulsePort == 443 {
@@ -77,7 +80,10 @@ func newGETDriver(host string, port uint16, opts util.DynamicMap) (Driver, error
 			req *http.Request,
 			via []*http.Request,
 		) error {
-			return errRedirects
+			if len(via) >= 3 {
+				return errRedirects
+			}
+			return nil
 		}}
 		// Do not pass port to Host header
 		if pulsePort == 80 {
