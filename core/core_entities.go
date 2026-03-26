@@ -1,9 +1,9 @@
 package core
 
 import (
+	"github.com/cloudflare/ipvs"
 	"github.com/qk4l/gorb/pulse"
 	log "github.com/sirupsen/logrus"
-	"github.com/tehnerd/gnl2go"
 )
 
 // Backend RS entity of gorb
@@ -21,8 +21,8 @@ func (rs *Backend) GetHealth() float64 {
 }
 
 // UpdateWeight save new weight and return prev
-func (rs *Backend) UpdateWeight(weight int32) int32 {
-	var oldValue int32
+func (rs *Backend) UpdateWeight(weight uint32) uint32 {
+	var oldValue uint32
 	oldValue, rs.options.weight = rs.options.weight, weight
 	return oldValue
 }
@@ -43,7 +43,7 @@ func (rs *Backend) Cleanup() {
 type Service struct {
 	vsID     string
 	options  *ServiceOptions
-	svc      gnl2go.Service
+	svc      ipvs.Service
 	backends map[string]*Backend
 }
 

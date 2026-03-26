@@ -70,3 +70,18 @@ func (o *Options) Validate() error {
 
 	return nil
 }
+
+func (o *Options) Compare(other *Options) bool {
+	if o.Type != other.Type {
+		return false
+	}
+	if o.Interval != other.Interval {
+		return false
+	}
+	for k, v := range o.Args {
+		if v != other.Args[k] {
+			return false
+		}
+	}
+	return true
+}

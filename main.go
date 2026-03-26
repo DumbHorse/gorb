@@ -45,7 +45,7 @@ var (
 
 	debug        = flag.Bool("v", false, "enable verbose output")
 	device       = flag.String("i", "eth0", "default interface to bind services on")
-	flush        = flag.Bool("f", false, "flush IPVS pools on start")
+	flushOnExit  = flag.Bool("f", false, "flushOnExit IPVS pools on exit")
 	listen       = flag.String("l", ":4672", "endpoint to listen for HTTP requests")
 	consul       = flag.String("c", "", "URL for Consul HTTP API")
 	vipInterface = flag.String("vipi", "", "interface to add VIPs")
@@ -55,6 +55,9 @@ var (
 	storeSyncTime    = flag.Int64("store-sync-time", 60, "sync-time for store")
 	storeServicePath = flag.String("store-service-path", "services", "store service path")
 	storeBackendPath = flag.String("store-backend-path", "backends", "store backend path")
+	tcpTimeout       = flag.Uint64("tcp-timeout", 28800, "ipvs TCP timeout in seconds")
+	tcpFinTimeout    = flag.Uint64("tcpfin-timeout", 120, "ipvs TCP FIN timeout in seconds")
+	udpTimeout       = flag.Uint64("udp-timeout", 300, "ipvs UDP timeout in seconds")
 )
 
 func main() {
