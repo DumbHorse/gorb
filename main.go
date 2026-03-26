@@ -26,7 +26,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 
+	"github.com/cloudflare/ipvs"
 	"github.com/qk4l/gorb/core"
 	"github.com/qk4l/gorb/util"
 
@@ -62,6 +65,10 @@ var (
 
 func main() {
 	// Called first to interrupt bootstrap and display usage if the user passed -h.
+	//config.InitConfig()
+	stopChan := make(chan os.Signal, 1)
+	signal.Notify(stopChan, syscall.SIGINT, syscall.SIGTERM)
+
 	flag.Parse()
 
 	if *debug {
@@ -95,12 +102,23 @@ func main() {
 		}()
 	}
 
-	ctx, err := core.NewContext(core.ContextOptions{
-		Disco:        *consul,
-		Endpoints:    hostIPs,
-		Flush:        *flush,
-		ListenPort:   listenPort,
-		VipInterface: *vipInterface})
+	ipvsOpt := core.IPVSOptions{
+		ipvs.Config{
+			TCPFinTimeout: uint32(*tcpFinTimeout),
+			TCPTimeout:    uint32(*tcpTimeout),
+			UDPTimeout:    uint32(*udpTimeout),
+		},
+	}
+
+	ctx, err := core.NewContext(
+		core.ContextOptions{
+			Disco:        *consul,
+			Endpoints:    hostIPs,
+			FlushOnExit:  *flushOnExit,
+			ListenPort:   listenPort,
+			VipInterface: *vipInterface,
+			IpvsOptions:  ipvsOpt,
+		})
 
 	if err != nil {
 		log.Fatalf("error while initializing server context: %s", err)
@@ -133,6 +151,23 @@ func main() {
 	r.Handle("/store/sync/status", storeSyncStatusHandler{store}).Methods("GET")
 	r.Handle("/metrics", promhttp.Handler()).Methods("GET")
 
-	log.Infof("setting up HTTP server on %s", *listen)
-	log.Fatal(http.ListenAndServe(*listen, r))
+	server := &http.Server{
+		Addr:    *listen,
+		Handler: r,
+	}
+
+	go func() {
+		log.Infof("setting up HTTP server on %s", *listen)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("error while starting HTTP server: %s", err)
+		}
+	}()
+
+	<-stopChan
+	signal.Stop(stopChan)
+
+	log.Info("shutting down...")
+	if err = server.Shutdown(nil); err != nil {
+		return
+	}
 }
