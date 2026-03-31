@@ -3,12 +3,14 @@ package core
 import (
 	"crypto/tls"
 	"errors"
-	"github.com/qk4l/gorb/local_store"
-	"gopkg.in/yaml.v3"
+	"net/netip"
 	"net/url"
 	"path"
 	"strings"
 	"time"
+
+	"github.com/qk4l/gorb/local_store"
+	"gopkg.in/yaml.v3"
 
 	"github.com/docker/libkv"
 	"github.com/docker/libkv/store"
@@ -242,7 +244,7 @@ func (s *Store) getStoreServices() (map[string]*ServiceConfig, error) {
 		if options.ServiceOptions == nil {
 			continue
 		} else {
-			options.ServiceOptions.Validate(nil)
+			options.ServiceOptions.Validate(netip.Addr{})
 		}
 		services[id] = &options
 	}

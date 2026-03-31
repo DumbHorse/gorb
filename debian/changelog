@@ -1,3 +1,11 @@
+gorb (0.5.0) unstable; urgency=medium
+
+  * Change ipvs lib to cloudflare/ipvs
+  * Pass persistent service to ipvs
+  * init graceful shutdown
+
+ -- Artem Aleksandrov <aaleksandrov@quantumbrains.com>  Mon, 27 Mar 2026 15:24:00 +0000
+
 gorb (0.4.1) unstable; urgency=medium
 
   * Fix wrong backends weight, Fix metrics

@@ -23,12 +23,11 @@ package core
 import (
 	"errors"
 	"net"
+	"net/netip"
 	"strings"
-	"syscall"
 
+	"github.com/cloudflare/ipvs"
 	"github.com/qk4l/gorb/pulse"
-
-	"github.com/tehnerd/gnl2go"
 )
 
 // Possible validation errors.
@@ -44,56 +43,70 @@ var (
 type ContextOptions struct {
 	Disco        string
 	Endpoints    []net.IP
-	Flush        bool
+	FlushOnExit  bool
 	ListenPort   uint16
 	VipInterface string
+	IpvsOptions  IPVSOptions
+}
+
+type IPVSOptions struct {
+	Timeouts ipvs.Config
+}
+
+func (o *IPVSOptions) Compare(other *ipvs.Config) bool {
+	if o.Timeouts.UDPTimeout != other.UDPTimeout ||
+		o.Timeouts.TCPTimeout != other.TCPTimeout ||
+		o.Timeouts.TCPFinTimeout != other.TCPFinTimeout {
+		return false
+	}
+
+	return true
 }
 
 // ServiceOptions describe a virtual service.
 type ServiceOptions struct {
 	//service settings
-	Host       string `json:"host" yaml:"host"`
-	Port       uint16 `json:"port" yaml:"port"`
-	Protocol   string `json:"protocol" yaml:"protocol"`
-	LbMethod   string `json:"lb_method" yaml:"lb_method"`
-	ShFlags    string `json:"sh_flags" yaml:"sh_flags"`
 	Host     string `json:"host" yaml:"host"`
 	Port     uint16 `json:"port" yaml:"port"`
 	Protocol string `json:"protocol" yaml:"protocol"`
 	LbMethod string `json:"lb_method" yaml:"lb_method"`
 	ShFlags  string `json:"sh_flags" yaml:"sh_flags"`
+
+	// Persistent service settings
 	Persistent bool   `json:"persistent" yaml:"persistent"`
-	Fallback   string `json:"fallback" yaml:"fallback"`
+	Timeout    uint32 `json:"timeout" yaml:"timeout"`
+
+	Fallback string `json:"fallback" yaml:"fallback"`
 
 	// service backends settings
 	FwdMethod string         `json:"fwd_method" yaml:"fwd_method"`
 	Pulse     *pulse.Options `json:"pulse" yaml:"pulse"`
-	MaxWeight int32          `json:"max_weight" yaml:"max_weight"`
+	MaxWeight uint32         `json:"max_weight" yaml:"max_weight"`
 
 	// Host string resolved to an IP, including DNS lookup.
-	host      net.IP
+	host      netip.Addr
 	delIfAddr bool
 
 	// Protocol string converted to a protocol number.
-	protocol uint16
+	protocol ipvs.Protocol
 
 	// Forwarding method string converted to a forwarding method number.
-	methodID uint32
+	methodID ipvs.ForwardType
 }
 
 // Validate fills missing fields and validates virtual service configuration.
-func (o *ServiceOptions) Validate(defaultHost net.IP) error {
+func (o *ServiceOptions) Validate(defaultHost netip.Addr) error {
 	if o.Port == 0 {
 		return ErrMissingEndpoint
 	}
 
 	if len(o.Host) != 0 {
 		if addr, err := net.ResolveIPAddr("ip", o.Host); err == nil {
-			o.host = addr.IP
+			o.host = netip.MustParseAddr(addr.IP.String())
 		} else {
 			return err
 		}
-	} else if defaultHost != nil {
+	} else if !defaultHost.IsUnspecified() {
 		o.host = defaultHost
 	} else {
 		return ErrMissingEndpoint
@@ -107,9 +120,9 @@ func (o *ServiceOptions) Validate(defaultHost net.IP) error {
 
 	switch o.Protocol {
 	case "tcp":
-		o.protocol = syscall.IPPROTO_TCP
+		o.protocol = ipvs.TCP
 	case "udp":
-		o.protocol = syscall.IPPROTO_UDP
+		o.protocol = ipvs.UDP
 	default:
 		return ErrUnknownProtocol
 	}
@@ -120,6 +133,10 @@ func (o *ServiceOptions) Validate(defaultHost net.IP) error {
 				return ErrUnknownFlag
 			}
 		}
+	}
+
+	if o.Timeout == 0 {
+		o.Timeout = 320
 	}
 
 	if o.Fallback != "" {
@@ -149,11 +166,11 @@ func (o *ServiceOptions) Validate(defaultHost net.IP) error {
 
 	switch o.FwdMethod {
 	case "dr":
-		o.methodID = gnl2go.IPVS_DIRECTROUTE
+		o.methodID = ipvs.DirectRoute
 	case "nat":
-		o.methodID = gnl2go.IPVS_MASQUERADING
+		o.methodID = ipvs.Masquerade
 	case "tunnel", "ipip":
-		o.methodID = gnl2go.IPVS_TUNNELING
+		o.methodID = ipvs.Tunnel
 	default:
 		return ErrUnknownMethod
 	}
@@ -185,6 +202,9 @@ func (o *ServiceOptions) CompareStoreOptions(options *ServiceOptions) bool {
 	if o.Persistent != options.Persistent {
 		return false
 	}
+	if o.Timeout != options.Timeout {
+		return false
+	}
 	if o.Fallback != options.Fallback {
 		return false
 	}
@@ -192,6 +212,9 @@ func (o *ServiceOptions) CompareStoreOptions(options *ServiceOptions) bool {
 		return false
 	}
 	if o.MaxWeight != options.MaxWeight {
+		return false
+	}
+	if !o.Pulse.Compare(options.Pulse) {
 		return false
 	}
 	return true
@@ -202,31 +225,31 @@ type BackendOptions struct {
 	Host string `json:"host" yaml:"host"`
 	Port uint16 `json:"port" yaml:"port"`
 	// MaxWeight override service MaxWeight
-	MaxWeight int32 `json:"max_weight" yaml:"max_weight"`
+	MaxWeight uint32 `json:"max_weight" yaml:"max_weight"`
 
 	// vsID of backend
 	vsID string
 	// Host string resolved to an IP, including DNS lookup.
-	host net.IP
+	host netip.Addr
 	// Backend current weight
-	weight int32
+	weight uint32
 }
 
 // Validate fills missing fields and validates backend configuration.
-func (o *BackendOptions) Validate(maxWeight int32, port uint16) error {
+func (o *BackendOptions) Validate(maxWeight uint32, port uint16) error {
 	if len(o.Host) == 0 || port == 0 {
 		return ErrMissingEndpoint
 	}
 	o.Port = port
 
 	if addr, err := net.ResolveIPAddr("ip", o.Host); err == nil {
-		o.host = addr.IP
+		o.host = netip.MustParseAddr(addr.IP.String())
 	} else {
 		return err
 	}
 	if o.MaxWeight == 0 {
 		if maxWeight == 0 {
-			o.MaxWeight = 100
+			o.MaxWeight = uint32(100)
 		} else {
 			o.MaxWeight = maxWeight
 		}

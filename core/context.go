@@ -24,32 +24,43 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
+	"os"
+	"strconv"
 	"sync"
 
+	"strings"
+
+	"github.com/cloudflare/ipvs/netmask"
 	"github.com/qk4l/gorb/disco"
 	"github.com/qk4l/gorb/pulse"
 	"github.com/qk4l/gorb/util"
 	"github.com/vishvananda/netlink"
 
-	"strings"
-
+	"github.com/cloudflare/ipvs"
 	log "github.com/sirupsen/logrus"
-	"github.com/tehnerd/gnl2go"
 )
 
-// Possible runtime errors.
+// Service flags
 var (
-	schedulerFlags = map[string]int{
-		"sh-fallback": gnl2go.IP_VS_SVC_F_SCHED_SH_FALLBACK,
-		"sh-port":     gnl2go.IP_VS_SVC_F_SCHED_SH_PORT,
-		"flag-1":      gnl2go.IP_VS_SVC_F_SCHED1,
-		"flag-2":      gnl2go.IP_VS_SVC_F_SCHED2,
-		"flag-3":      gnl2go.IP_VS_SVC_F_SCHED3,
+	schedulerFlags = map[string]ipvs.Flags{
+		"srv-persistent": ipvs.ServicePersistent,
+		"srv-one-packet": ipvs.ServiceOnePacket,
+		"srv-hashed":     ipvs.ServiceHashed,
+		"sh-fallback":    ipvs.ServiceSchedulerOpt1, // Source Hashing sched flag
+		"sh-port":        ipvs.ServiceSchedulerOpt2, // Source Hashing sched flag
+		"flag-1":         ipvs.ServiceSchedulerOpt1,
+		"flag-2":         ipvs.ServiceSchedulerOpt2,
+		"flag-3":         ipvs.ServiceSchedulerOpt3,
 	}
 	fallbackFlags = map[string]int16{
 		"fb-default":     Default,
 		"fb-zero-to-one": ZeroToOne,
 	}
+)
+
+// Possible runtime errors.
+var (
 	ErrIpvsSyscallFailed = errors.New("error while calling into IPVS")
 	ErrObjectExists      = errors.New("specified object already exists")
 	ErrObjectNotFound    = errors.New("unable to locate specified object")
@@ -66,48 +77,61 @@ const (
 
 // Context abstacts away the underlying IPVS bindings implementation.
 type Context struct {
-	ipvs         Ipvs
-	endpoint     net.IP
-	services     map[string]*Service
-	mutex        sync.RWMutex
-	pulseCh      chan pulse.Update
-	disco        disco.Driver
-	stopCh       chan struct{}
 	vipInterface netlink.Link
-	store        *Store
+	flushOnExit  bool
+	endpoint     net.IP
+	mutex        sync.RWMutex
+
+	services map[string]*Service
+
+	disco disco.Driver
+	store *Store
+	ipvs  ipvs.Client
+
+	pulseCh chan pulse.Update
+	stopCh  chan struct{}
 }
 
-type Ipvs interface {
-	Init() error
-	Exit()
-	Flush() error
-	AddService(vip string, port uint16, protocol uint16, sched string) error
-	AddServiceWithFlags(vip string, port uint16, protocol uint16, sched string, flags []byte) error
-	DelService(vip string, port uint16, protocol uint16) error
-	AddDestPort(vip string, vport uint16, rip string, rport uint16, protocol uint16, weight int32, fwd uint32) error
-	UpdateDestPort(vip string, vport uint16, rip string, rport uint16, protocol uint16, weight int32, fwd uint32) error
-	DelDestPort(vip string, vport uint16, rip string, rport uint16, protocol uint16) error
-	// Unforture not work =(
-	// GetPoolForService(svc gnl2go.Service) (gnl2go.Pool, error)
-	GetPools() ([]gnl2go.Pool, error)
+func initIPVSClient(options ContextOptions) (*ipvs.Client, error) {
+	client, err := ipvs.New()
+	if err != nil {
+		log.Errorf("%v: %v", ErrIpvsSyscallFailed, err)
+		return nil, err
+	}
+	timeouts, err := client.Config()
+	if err != nil {
+		log.Errorf("%v: %v", ErrIpvsSyscallFailed, err)
+		return &client, err
+	}
+	log.Infof("IPVS config: %+v", timeouts)
+	if !options.IpvsOptions.Compare(&timeouts) {
+		log.Infof("IPVS config is different from the one provided, update")
+		if err := client.SetConfig(options.IpvsOptions.Timeouts); err != nil {
+			log.Errorf("%v: %v", ErrIpvsSyscallFailed, err)
+			return &client, err
+		}
+	}
+	return &client, nil
 }
 
 // NewContext creates a new Context and initializes IPVS.
 func NewContext(options ContextOptions) (*Context, error) {
 	log.Info("initializing IPVS context")
+	client, err := initIPVSClient(options)
+	if err != nil {
+		return nil, err
+	}
 
 	ctx := &Context{
-		ipvs:     &gnl2go.IpvsClient{},
-		services: make(map[string]*Service),
-		pulseCh:  make(chan pulse.Update),
-		stopCh:   make(chan struct{}),
+		ipvs:        *client,
+		flushOnExit: options.FlushOnExit,
+		services:    make(map[string]*Service),
+		pulseCh:     make(chan pulse.Update),
+		stopCh:      make(chan struct{}),
 	}
 
 	if len(options.Disco) > 0 {
 		log.Infof("creating Consul client with Agent URL: %s", options.Disco)
-
-		var err error
-
 		ctx.disco, err = disco.New(&disco.Options{
 			Type: "consul",
 			Args: util.DynamicMap{"URL": options.Disco}})
@@ -126,19 +150,6 @@ func NewContext(options ContextOptions) (*Context, error) {
 			log.Info("Registered the REST service to Consul.")
 			ctx.disco.Expose("gorb", ctx.endpoint.String(), options.ListenPort)
 		}
-	}
-	if err := ctx.ipvs.Init(); err != nil {
-		log.Errorf("unable to initialize IPVS context: %s", err)
-
-		// Here and in other places: IPVS errors are abstracted to make GNL2GO
-		// replaceable in the future, since it's not really maintained anymore.
-		return nil, ErrIpvsSyscallFailed
-	}
-
-	if options.Flush && ctx.ipvs.Flush() != nil {
-		log.Errorf("unable to clean up IPVS pools - ensure ip_vs is loaded")
-		ctx.Close()
-		return nil, ErrIpvsSyscallFailed
 	}
 
 	if options.VipInterface != "" {
@@ -165,36 +176,44 @@ func (ctx *Context) Close() {
 	// This will also shutdown the pulse notification sink goroutine.
 	close(ctx.stopCh)
 
-	for vsID := range ctx.services {
-		ctx.RemoveService(vsID)
-	}
-
-	// This is not strictly required, as far as I know.
-	ctx.ipvs.Exit()
-}
-
-// ipvs.GetPoolForService() not works =( impement via iteration
-func (ctx *Context) GetPoolForService(svc gnl2go.Service) (gnl2go.Pool, error) {
-	ipvs_pools, err := ctx.ipvs.GetPools()
-	if err != nil {
-		log.Errorf("Failed to get pools from ipvs: %s", err)
-		return gnl2go.Pool{}, ErrIpvsSyscallFailed
-	}
-
-	log.Debugf("IPVS has %d polls", len(ipvs_pools))
-
-	for _, ipvs_pool := range ipvs_pools {
-		if ipvs_pool.Service.IsEqual(svc) {
-			return ipvs_pool, nil
+	if ctx.flushOnExit {
+		for vsID := range ctx.services {
+			ctx.RemoveService(vsID)
 		}
 	}
-	return gnl2go.Pool{}, fmt.Errorf("service doesn't exist")
+}
+
+// GetIpvsService extract service from ipvs
+func (ctx *Context) GetIpvsService(svc *ipvs.Service) (ipvs.ServiceExtended, error) {
+	service, err := ctx.ipvs.Service(*svc)
+	if err != nil {
+		log.Errorf("Failed to get pools from ipvs: %s", err)
+		return ipvs.ServiceExtended{}, ErrIpvsSyscallFailed
+	}
+
+	return service, nil
+}
+
+// GetIpvsServiceBackends extract service destinations from ipvs
+func (ctx *Context) GetIpvsServiceBackends(svc *ipvs.Service) ([]ipvs.DestinationExtended, error) {
+	backends, err := ctx.ipvs.Destinations(*svc)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			log.Warnf("No destinations for service %s:%d", svc.Address.String(), svc.Port)
+			return make([]ipvs.DestinationExtended, 0), nil
+		}
+		log.Errorf("Failed to get pools from ipvs: %s", err)
+		return make([]ipvs.DestinationExtended, 0), ErrIpvsSyscallFailed
+	}
+	log.Debugf("Found %d destinations", len(backends))
+
+	return backends, nil
 }
 
 // CreateService registers a new virtual service with IPVS.
 func (ctx *Context) createService(vsID string, serviceConfig *ServiceConfig) error {
 	serviceOptions := serviceConfig.ServiceOptions
-	if err := serviceOptions.Validate(ctx.endpoint); err != nil {
+	if err := serviceOptions.Validate(netip.MustParseAddr(ctx.endpoint.String())); err != nil {
 		return err
 	}
 
@@ -219,51 +238,35 @@ func (ctx *Context) createService(vsID string, serviceConfig *ServiceConfig) err
 	log.Infof("creating virtual service [%s] on %s:%d", vsID, serviceOptions.host,
 		serviceOptions.Port)
 
-	var svc = gnl2go.Service{
-		Proto: serviceOptions.protocol,
-		VIP:   serviceOptions.host.String(),
-		Port:  serviceOptions.Port,
-		Sched: serviceOptions.LbMethod,
-	}
-
-	var flags int
+	var flags ipvs.Flags
 	for _, flag := range strings.Split(serviceOptions.ShFlags, "|") {
 		flags = flags | schedulerFlags[flag]
-		if flags != 0 {
-			svc.Flags = gnl2go.U32ToBinFlags(uint32(flags))
-		}
 	}
 
-	_, err := ctx.GetPoolForService(svc)
+	var svc = ipvs.Service{
+		Address:   netip.MustParseAddr(serviceOptions.host.String()),
+		Port:      serviceOptions.Port,
+		Netmask:   netmask.MaskFrom4([4]byte{255, 255, 255, 255}), // /32
+		Scheduler: serviceOptions.LbMethod,
+		Timeout:   serviceOptions.Timeout,
+		Flags:     flags,
+		Family:    ipvs.INET,
+		Protocol:  serviceOptions.protocol,
+	}
 
-	if err == nil {
-		log.Infof("Service %s:%d already existed skip creation", svc.VIP, svc.Port)
+	if _, err := ctx.GetIpvsService(&svc); err == nil {
+		log.Infof("Service %s:%d already existed skip creation", svc.Address.String(), svc.Port)
 	} else {
-		if flags != 0 {
-			if err := ctx.ipvs.AddServiceWithFlags(
-				svc.VIP,
-				svc.Port,
-				svc.Proto,
-				svc.Sched,
-				svc.Flags,
-			); err != nil {
-				log.Errorf("error while creating virtual service: %s", err)
-				return ErrIpvsSyscallFailed
-			}
-		} else {
-			if err := ctx.ipvs.AddService(
-				svc.VIP,
-				svc.Port,
-				svc.Proto,
-				svc.Sched,
-			); err != nil {
-				log.Errorf("error while creating virtual service: %s", err)
-				return ErrIpvsSyscallFailed
-			}
+		log.Infof("Service %s:%d does not exist, create", svc.Address.String(), svc.Port)
+		if err := ctx.ipvs.CreateService(svc); err != nil {
+			log.Errorf("error while creating virtual service: %s", err)
+			return ErrIpvsSyscallFailed
 		}
 	}
 
-	ctx.services[vsID] = &Service{vsID: vsID, options: serviceOptions, svc: svc, backends: make(map[string]*Backend)}
+	if _, ok := ctx.services[vsID]; !ok {
+		ctx.services[vsID] = &Service{vsID: vsID, options: serviceOptions, svc: svc, backends: make(map[string]*Backend)}
+	}
 
 	if err := ctx.disco.Expose(vsID, serviceOptions.host.String(), serviceOptions.Port); err != nil {
 		log.Errorf("error while exposing service to Disco: %s", err)
@@ -303,7 +306,7 @@ func (ctx *Context) createBackend(vsID, rsID string, opts *BackendOptions) error
 		return err
 	}
 
-	if util.AddrFamily(opts.host) != util.AddrFamily(vs.options.host) {
+	if opts.host.Is4() != vs.options.host.Is4() {
 		return ErrIncompatibleAFs
 	}
 
@@ -313,34 +316,33 @@ func (ctx *Context) createBackend(vsID, rsID string, opts *BackendOptions) error
 		opts.Port,
 		vsID)
 
-	var newDest = gnl2go.Dest{
-		IP:     opts.host.String(),
-		Weight: vs.options.MaxWeight,
-		Port:   opts.Port,
+	var newDest = ipvs.Destination{
+		Address:   netip.MustParseAddr(opts.host.String()),
+		Port:      opts.Port,
+		FwdMethod: vs.options.methodID,
+		Weight:    opts.MaxWeight,
+		Family:    ipvs.INET,
 	}
 
-	pool, err := ctx.GetPoolForService(vs.svc)
+	pool, err := ctx.GetIpvsServiceBackends(&vs.svc)
 	if err != nil {
-		log.Errorf("Failed to get pool for service [%s]: %s", vs.svc.VIP, err)
+		log.Errorf("Failed to get pool for service [%s]: %s", vs.svc.Address.String(), err)
 		return ErrIpvsSyscallFailed
 	}
 
-	for _, dest := range pool.Dests {
-		if dest.IP == newDest.IP && dest.Port == newDest.Port {
-			log.Infof("Backend %s:%d already existed in service [%s]. Skip creation", newDest.IP, newDest.Port, vsID)
+	for _, dest := range pool {
+		if dest.Address.Compare(newDest.Address) == 0 && dest.Port == newDest.Port {
+			log.Infof(
+				"Backend %s:%d already existed in service [%s]. Skip creation",
+				newDest.Address.String(), newDest.Port, vsID)
 			skipCreation = true
 		}
 	}
 
 	if !skipCreation {
-		if err := ctx.ipvs.AddDestPort(
-			vs.options.host.String(),
-			vs.options.Port,
-			newDest.IP,
-			newDest.Port,
-			vs.options.protocol,
-			newDest.Weight,
-			vs.options.methodID,
+		if err := ctx.ipvs.CreateDestination(
+			vs.svc,
+			newDest,
 		); err != nil {
 			log.Errorf("error while creating backend [%s/%s]: %s", vsID, rsID, err)
 			return ErrIpvsSyscallFailed
@@ -366,7 +368,7 @@ func (ctx *Context) CreateBackend(vsID, rsID string, opts *BackendOptions) error
 }
 
 // UpdateBackend updates the specified backend's weight.
-func (ctx *Context) updateBackend(vsID, rsID string, weight int32) (int32, error) {
+func (ctx *Context) updateBackend(vsID, rsID string, weight uint32) (uint32, error) {
 
 	vs, exists := ctx.services[vsID]
 	if !exists {
@@ -380,15 +382,15 @@ func (ctx *Context) updateBackend(vsID, rsID string, weight int32) (int32, error
 	log.Infof("updating backend [%s/%s] with weight: %d", vsID, rsID,
 		weight)
 
-	if err := ctx.ipvs.UpdateDestPort(
-		rs.service.options.host.String(),
-		rs.service.options.Port,
-		rs.options.host.String(),
-		rs.options.Port,
-		rs.service.options.protocol,
-		weight,
-		vs.options.methodID,
-	); err != nil {
+	if err := ctx.ipvs.UpdateDestination(
+		vs.svc,
+		ipvs.Destination{
+			Address:   rs.options.host,
+			Port:      rs.options.Port,
+			FwdMethod: vs.options.methodID,
+			Weight:    weight,
+			Family:    ipvs.INET,
+		}); err != nil {
 		log.Errorf("error while updating backend [%s/%s]", vsID, rsID)
 		return 0, ErrIpvsSyscallFailed
 	}
@@ -409,7 +411,7 @@ func (ctx *Context) updateBackend(vsID, rsID string, weight int32) (int32, error
 }
 
 // UpdateBackend updates the specified backend's weight.
-func (ctx *Context) UpdateBackend(vsID, rsID string, weight int32) (int32, error) {
+func (ctx *Context) UpdateBackend(vsID, rsID string, weight uint32) (uint32, error) {
 	ctx.mutex.Lock()
 	defer ctx.mutex.Unlock()
 	return ctx.updateBackend(vsID, rsID, weight)
@@ -438,11 +440,7 @@ func (ctx *Context) removeService(vsID string) (*ServiceOptions, error) {
 		vs.options.host,
 		vs.options.Port)
 
-	if err := ctx.ipvs.DelService(
-		vs.options.host.String(),
-		vs.options.Port,
-		vs.options.protocol,
-	); err != nil {
+	if err := ctx.ipvs.RemoveService(vs.svc); err != nil {
 		log.Errorf("error while removing virtual service [%s] from ipvs: %s", vsID, err)
 		return nil, ErrIpvsSyscallFailed
 	}
@@ -477,14 +475,14 @@ func (ctx *Context) removeBackend(vsID, rsID string) (*BackendOptions, error) {
 	}
 
 	log.Infof("removing backend [%s/%s]", vsID, rsID)
-
-	if err := ctx.ipvs.DelDestPort(
-		vs.options.host.String(),
-		vs.options.Port,
-		rs.options.host.String(),
-		rs.options.Port,
-		rs.service.options.protocol,
-	); err != nil {
+	if err := ctx.ipvs.RemoveDestination(
+		vs.svc,
+		ipvs.Destination{
+			Address:   rs.options.host,
+			Port:      rs.options.Port,
+			Family:    ipvs.INET,
+			FwdMethod: vs.options.methodID,
+		}); err != nil {
 		log.Errorf("error while removing backend [%s/%s] form ipvs: %s", vsID, rsID, err)
 		return nil, ErrIpvsSyscallFailed
 	}
@@ -542,7 +540,7 @@ func (ctx *Context) GetService(vsID string) (*ServiceInfo, error) {
 type BackendInfo struct {
 	Options *BackendOptions `json:"options"`
 	Metrics pulse.Metrics   `json:"metrics"`
-	Weight  int32           `json:"weight"`
+	Weight  uint32          `json:"weight"`
 }
 
 // GetBackend returns information about a backend.
@@ -627,12 +625,9 @@ func (ctx *Context) CompareWith(storeServices map[string]*ServiceConfig) *StoreS
 	return syncStatus
 }
 
-func (ctx *Context) Synchronize(storeServicesConfig map[string]*ServiceConfig) error {
-	ctx.mutex.Lock()
-	defer ctx.mutex.Unlock()
-	defer log.Info("============================ END SYNC ============================")
-	log.Info("============================== SYNC ==============================")
-
+func (ctx *Context) synchronizeWithStore(storeServicesConfig map[string]*ServiceConfig) error {
+	defer log.Info("============================ END STORE SYNC ============================")
+	log.Info("============================== STORE SYNC ==============================")
 	log.Debug("external store content")
 	for vsID, service := range storeServicesConfig {
 		log.Debugf("SERVICE[%s]: %#v", vsID, service)
@@ -654,6 +649,7 @@ func (ctx *Context) Synchronize(storeServicesConfig map[string]*ServiceConfig) e
 				if err := ctx.createService(vsID, storeService); err != nil {
 					return err
 				}
+				service = ctx.services[vsID]
 			}
 			for rsID, backend := range service.backends {
 				if storeBackendOptions, ok := storeService.ServiceBackends[rsID]; !ok {
@@ -677,22 +673,100 @@ func (ctx *Context) Synchronize(storeServicesConfig map[string]*ServiceConfig) e
 					delete(storeService.ServiceBackends, rsID)
 				}
 			}
-			log.Infof("create new backends for [%s]. count: %d", vsID, len(storeService.ServiceBackends))
-			for rsID, storeBackendOptions := range storeService.ServiceBackends {
-				if err := ctx.createBackend(vsID, rsID, storeBackendOptions); err != nil {
-					return err
+
+			if len(storeService.ServiceBackends) > 0 {
+				log.Infof("create new backends for [%s]. count: %d", vsID, len(storeService.ServiceBackends))
+				for rsID, storeBackendOptions := range storeService.ServiceBackends {
+					if err := ctx.createBackend(vsID, rsID, storeBackendOptions); err != nil {
+						return err
+					}
 				}
 			}
 			delete(storeServicesConfig, vsID)
 		}
 	}
-	log.Infof("create new services. count: %d", len(storeServicesConfig))
-	for id, storeServiceOptions := range storeServicesConfig {
-		if err := ctx.createService(id, storeServiceOptions); err != nil {
-			return err
+	if len(storeServicesConfig) > 0 {
+		log.Infof("create new services. count: %d", len(storeServicesConfig))
+		for id, storeServiceOptions := range storeServicesConfig {
+			if err := ctx.createService(id, storeServiceOptions); err != nil {
+				return err
+			}
 		}
 	}
 
 	log.Info("Successfully synced with store")
+	return nil
+}
+
+func (ctx *Context) synchronizeWithIPVS() error {
+	defer log.Info("============================ END IPVS SYNC ============================")
+	log.Info("============================== IPVS SYNC ==============================")
+	vsID := strings.Builder{}
+	rsID := strings.Builder{}
+
+	ipvsService, err := ctx.ipvs.Services()
+	if err != nil {
+		return err
+	}
+
+	for _, service := range ipvsService {
+		vsID.Reset()
+		vsID.WriteString(service.Service.Address.String())
+		vsID.WriteString(":")
+		vsID.WriteString(strconv.Itoa(int(service.Service.Port)))
+
+		srv, ok := ctx.services[vsID.String()]
+		if !ok {
+			log.Infof("service [%s] not found in context. removing", vsID.String())
+			if err := ctx.ipvs.RemoveService(service.Service); err != nil {
+				log.Errorf("error while removing service [%s] from ipvs: %s", vsID.String(), err)
+				return err
+			}
+			continue
+		}
+		log.Infof("service [%s] found in context. updating", vsID.String())
+		err := ctx.ipvs.UpdateService(srv.svc)
+		if err != nil {
+			log.Errorf("error while updating service [%s] from ipvs: %s", vsID.String(), err)
+			return err
+		}
+
+		ipvsBackends, err := ctx.GetIpvsServiceBackends(&srv.svc)
+		if err != nil {
+			log.Errorf("error while getting backends of service [%s] from ipvs: %s", vsID.String(), err)
+			return err
+		}
+		for _, backend := range ipvsBackends {
+			rsID.Reset()
+			rsID.WriteString(backend.Address.String())
+			rsID.WriteString(":")
+			rsID.WriteString(strconv.Itoa(int(backend.Port)))
+
+			if _, ok := srv.backends[rsID.String()]; !ok {
+				log.Infof("backend [%s/%s] not found in context. removing", vsID.String(), rsID.String())
+				if err := ctx.ipvs.RemoveDestination(srv.svc, backend.Destination); err != nil {
+					log.Errorf("error while removing backend [%s:%s] from ipvs: %s", vsID.String(), rsID.String(), err)
+					return err
+				}
+			}
+
+		}
+	}
+	return nil
+}
+
+func (ctx *Context) Synchronize(storeServicesConfig map[string]*ServiceConfig) error {
+	ctx.mutex.Lock()
+	defer ctx.mutex.Unlock()
+	err := ctx.synchronizeWithStore(storeServicesConfig)
+	if err != nil {
+		return err
+	}
+
+	err = ctx.synchronizeWithIPVS()
+	if err != nil {
+		return err
+	}
+
 	return nil
 }

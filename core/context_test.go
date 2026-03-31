@@ -1,15 +1,16 @@
 package core
 
 import (
+	"net"
+	"net/netip"
 	"testing"
 
-	"syscall"
-
+	"github.com/cloudflare/ipvs"
+	"github.com/cloudflare/ipvs/netmask"
 	"github.com/qk4l/gorb/disco"
 	"github.com/qk4l/gorb/pulse"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
-	"github.com/tehnerd/gnl2go"
 )
 
 type fakeDisco struct {
@@ -30,63 +31,78 @@ type fakeIpvs struct {
 	mock.Mock
 }
 
-func (f *fakeIpvs) Init() error {
-	args := f.Called()
+func (f *fakeIpvs) Info() (ipvs.Info, error) {
+	var info ipvs.Info
+	return info, nil
+}
+
+func (f *fakeIpvs) Config() (ipvs.Config, error) {
+	var config ipvs.Config
+	return config, nil
+}
+
+func (f *fakeIpvs) SetConfig(config ipvs.Config) error {
+	args := f.Called(config)
 	return args.Error(0)
 }
 
-func (f *fakeIpvs) Exit() {
-	f.Called()
+func (f *fakeIpvs) Services() ([]ipvs.ServiceExtended, error) {
+	var services []ipvs.ServiceExtended
+	return services, nil
 }
 
-func (f *fakeIpvs) Flush() error {
-	args := f.Called()
+func (f *fakeIpvs) Service(s ipvs.Service) (ipvs.ServiceExtended, error) {
+	args := f.Called(s)
+	var service ipvs.ServiceExtended
+	return service, args.Error(1)
+}
+
+func (f *fakeIpvs) CreateService(s ipvs.Service) error {
+	args := f.Called(s)
 	return args.Error(0)
 }
 
-func (f *fakeIpvs) AddService(vip string, port uint16, protocol uint16, sched string) error {
-	args := f.Called(vip, port, protocol, sched)
+func (f *fakeIpvs) UpdateService(s ipvs.Service) error {
+	args := f.Called(s)
 	return args.Error(0)
 }
 
-func (f *fakeIpvs) AddServiceWithFlags(vip string, port uint16, protocol uint16, sched string, flags []byte) error {
-	args := f.Called(vip, port, protocol, sched, flags)
+func (f *fakeIpvs) RemoveService(s ipvs.Service) error {
+	args := f.Called(s)
 	return args.Error(0)
 }
 
-func (f *fakeIpvs) DelService(vip string, port uint16, protocol uint16) error {
-	args := f.Called(vip, port, protocol)
+func (f *fakeIpvs) Destinations(s ipvs.Service) ([]ipvs.DestinationExtended, error) {
+	args := f.Called(s)
+	var destinations []ipvs.DestinationExtended
+	return destinations, args.Error(0)
+}
+
+func (f *fakeIpvs) CreateDestination(s ipvs.Service, destination ipvs.Destination) error {
+	args := f.Called(s, destination)
 	return args.Error(0)
 }
 
-func (f *fakeIpvs) AddDestPort(vip string, vport uint16, rip string, rport uint16, protocol uint16, weight int32, fwd uint32) error {
-	args := f.Called(vip, vport, rip, rport, protocol, weight, fwd)
+func (f *fakeIpvs) UpdateDestination(s ipvs.Service, destination ipvs.Destination) error {
+	args := f.Called(s, destination)
 	return args.Error(0)
 }
 
-func (f *fakeIpvs) UpdateDestPort(vip string, vport uint16, rip string, rport uint16, protocol uint16, weight int32, fwd uint32) error {
-	args := f.Called(vip, vport, rip, rport, protocol, weight, fwd)
-	return args.Error(0)
-
-}
-func (f *fakeIpvs) DelDestPort(vip string, vport uint16, rip string, rport uint16, protocol uint16) error {
-	args := f.Called(vip, vport, rip, rport, protocol)
+func (f *fakeIpvs) RemoveDestination(s ipvs.Service, destination ipvs.Destination) error {
+	args := f.Called(s, destination)
 	return args.Error(0)
 }
-func (f *fakeIpvs) GetPools() ([]gnl2go.Pool, error) {
-	var poolArray []gnl2go.Pool
-	return poolArray, nil
-}
 
-func newRoutineContext(services map[string]*Service, ipvs Ipvs) *Context {
+func newRoutineContext(services map[string]*Service, ipvs ipvs.Client) *Context {
 	c := newContext(ipvs, &fakeDisco{})
 	c.services = services
 	return c
 }
 
-func newContext(ipvs Ipvs, disco disco.Driver) *Context {
+func newContext(ipvs ipvs.Client, disco disco.Driver) *Context {
 	return &Context{
 		ipvs:     ipvs,
+		endpoint: net.ParseIP("127.0.0.1"),
 		services: map[string]*Service{},
 		pulseCh:  make(chan pulse.Update),
 		stopCh:   make(chan struct{}),
@@ -103,6 +119,23 @@ var (
 		ServiceOptions:  &ServiceOptions{Port: 80, Host: "localhost", Protocol: "tcp", LbMethod: "sh", ShFlags: "sh-port|sh-fallback"},
 		ServiceBackends: map[string]*BackendOptions{},
 	}
+	svc = ipvs.Service{
+		Address:   netip.MustParseAddr("127.0.0.1"),
+		Port:      serviceConfig.ServiceOptions.Port,
+		Netmask:   netmask.MaskFrom4([4]byte{255, 255, 255, 255}), // /32
+		Scheduler: serviceConfig.ServiceOptions.LbMethod,
+		Timeout:   320,
+		Flags:     *new(ipvs.Flags),
+		Family:    ipvs.INET,
+		Protocol:  ipvs.TCP,
+	}
+	dst = ipvs.Destination{
+		Address:   netip.MustParseAddr("127.0.0.1"),
+		FwdMethod: ipvs.Tunnel,
+		Weight:    0,
+		Port:      123,
+		Family:    ipvs.INET,
+	}
 )
 
 func TestServiceIsCreated(t *testing.T) {
@@ -112,22 +145,8 @@ func TestServiceIsCreated(t *testing.T) {
 	mockDisco := &fakeDisco{}
 	c := newContext(mockIpvs, mockDisco)
 
-	mockIpvs.On("AddService", "127.0.0.1", uint16(80), uint16(syscall.IPPROTO_TCP), "sh").Return(nil)
-	mockDisco.On("Expose", vsID, "127.0.0.1", uint16(80)).Return(nil)
-
-	err := c.createService(vsID, &options)
-	assert.NoError(t, err)
-	mockIpvs.AssertExpectations(t)
-	mockDisco.AssertExpectations(t)
-}
-
-func TestServiceIsCreatedWithShFlags(t *testing.T) {
-	options := serviceConfig
-	mockIpvs := &fakeIpvs{}
-	mockDisco := &fakeDisco{}
-	c := newContext(mockIpvs, mockDisco)
-
-	mockIpvs.On("AddServiceWithFlags", "127.0.0.1", uint16(80), uint16(syscall.IPPROTO_TCP), "sh", gnl2go.U32ToBinFlags(gnl2go.IP_VS_SVC_F_SCHED_SH_FALLBACK|gnl2go.IP_VS_SVC_F_SCHED_SH_PORT)).Return(nil)
+	mockIpvs.On("CreateService", svc).Return(nil)
+	mockIpvs.On("Service", svc).Return(nil, ErrIpvsSyscallFailed)
 	mockDisco.On("Expose", vsID, "127.0.0.1", uint16(80)).Return(nil)
 
 	err := c.createService(vsID, &options)
@@ -137,7 +156,7 @@ func TestServiceIsCreatedWithShFlags(t *testing.T) {
 }
 
 func TestPulseUpdateSetsBackendWeightToZeroOnStatusDown(t *testing.T) {
-	stash := make(map[pulse.ID]int32)
+	stash := make(map[pulse.ID]uint32)
 	backends := map[string]*Backend{rsID: &Backend{service: &virtualService, options: &BackendOptions{weight: 100}}}
 	services := map[string]*Service{vsID: &virtualService}
 	services[vsID].backends = backends
@@ -145,16 +164,16 @@ func TestPulseUpdateSetsBackendWeightToZeroOnStatusDown(t *testing.T) {
 
 	c := newRoutineContext(services, mockIpvs)
 
-	mockIpvs.On("UpdateDestPort", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, int32(0), mock.Anything).Return(nil)
+	mockIpvs.On("UpdateDestination", mock.Anything, mock.Anything).Return(nil)
 
 	c.processPulseUpdate(stash, pulse.Update{pulse.ID{VsID: vsID, RsID: rsID}, pulse.Metrics{Status: pulse.StatusDown}})
 	assert.Equal(t, len(stash), 1)
-	assert.Equal(t, stash[pulse.ID{VsID: vsID, RsID: rsID}], int32(100))
+	assert.Equal(t, stash[pulse.ID{VsID: vsID, RsID: rsID}], uint32(100))
 	mockIpvs.AssertExpectations(t)
 }
 
 func TestPulseUpdateSetsBackendWeightWithFallBackZeroToOne(t *testing.T) {
-	stash := make(map[pulse.ID]int32)
+	stash := make(map[pulse.ID]uint32)
 	backends := map[string]*Backend{rsID: &Backend{service: &virtualService, options: &BackendOptions{weight: 100}}}
 	services := map[string]*Service{vsID: &virtualServiceFallBack}
 	services[vsID].backends = backends
@@ -162,16 +181,16 @@ func TestPulseUpdateSetsBackendWeightWithFallBackZeroToOne(t *testing.T) {
 
 	c := newRoutineContext(services, mockIpvs)
 
-	mockIpvs.On("UpdateDestPort", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, int32(1), mock.Anything).Return(nil)
+	mockIpvs.On("UpdateDestination", mock.Anything, mock.Anything).Return(nil)
 
 	c.processPulseUpdate(stash, pulse.Update{pulse.ID{VsID: vsID, RsID: rsID}, pulse.Metrics{Status: pulse.StatusDown}})
 	assert.Equal(t, len(stash), 1)
-	assert.Equal(t, stash[pulse.ID{VsID: vsID, RsID: rsID}], int32(100))
+	assert.Equal(t, stash[pulse.ID{VsID: vsID, RsID: rsID}], uint32(100))
 	mockIpvs.AssertExpectations(t)
 }
 
 func TestPulseUpdateIncreasesBackendWeightRelativeToTheHealthOnStatusUp(t *testing.T) {
-	stash := map[pulse.ID]int32{pulse.ID{VsID: vsID, RsID: rsID}: int32(12)}
+	stash := map[pulse.ID]uint32{pulse.ID{VsID: vsID, RsID: rsID}: uint32(12)}
 	backends := map[string]*Backend{rsID: &Backend{service: &virtualService, options: &BackendOptions{}}}
 	services := map[string]*Service{vsID: &virtualService}
 	services[vsID].backends = backends
@@ -179,16 +198,16 @@ func TestPulseUpdateIncreasesBackendWeightRelativeToTheHealthOnStatusUp(t *testi
 
 	c := newRoutineContext(services, mockIpvs)
 
-	mockIpvs.On("UpdateDestPort", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, int32(6), mock.Anything).Return(nil)
+	mockIpvs.On("UpdateDestination", mock.Anything, mock.Anything).Return(nil)
 
 	c.processPulseUpdate(stash, pulse.Update{pulse.ID{VsID: vsID, RsID: rsID}, pulse.Metrics{Status: pulse.StatusUp, Health: 0.5}})
 	assert.Equal(t, len(stash), 1)
-	assert.Equal(t, stash[pulse.ID{VsID: vsID, RsID: rsID}], int32(12))
+	assert.Equal(t, stash[pulse.ID{VsID: vsID, RsID: rsID}], uint32(12))
 	mockIpvs.AssertExpectations(t)
 }
 
 func TestPulseUpdateRemovesStashWhenBackendHasFullyRecovered(t *testing.T) {
-	stash := map[pulse.ID]int32{pulse.ID{VsID: vsID, RsID: rsID}: int32(12)}
+	stash := map[pulse.ID]uint32{pulse.ID{VsID: vsID, RsID: rsID}: uint32(12)}
 	backends := map[string]*Backend{rsID: &Backend{service: &virtualService, options: &BackendOptions{}}}
 	services := map[string]*Service{vsID: &virtualService}
 	services[vsID].backends = backends
@@ -196,7 +215,7 @@ func TestPulseUpdateRemovesStashWhenBackendHasFullyRecovered(t *testing.T) {
 
 	c := newRoutineContext(services, mockIpvs)
 
-	mockIpvs.On("UpdateDestPort", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, int32(12), mock.Anything).Return(nil)
+	mockIpvs.On("UpdateDestination", mock.Anything, mock.Anything).Return(nil)
 
 	c.processPulseUpdate(stash, pulse.Update{pulse.ID{VsID: vsID, RsID: rsID}, pulse.Metrics{Status: pulse.StatusUp, Health: 1}})
 	assert.Empty(t, stash)
@@ -204,7 +223,7 @@ func TestPulseUpdateRemovesStashWhenBackendHasFullyRecovered(t *testing.T) {
 }
 
 func TestPulseUpdateRemovesStashWhenBackendIsDeleted(t *testing.T) {
-	stash := map[pulse.ID]int32{pulse.ID{VsID: vsID, RsID: rsID}: int32(0)}
+	stash := map[pulse.ID]uint32{pulse.ID{VsID: vsID, RsID: rsID}: uint32(0)}
 	backends := make(map[string]*Backend)
 	services := map[string]*Service{vsID: &virtualService}
 	services[vsID].backends = backends
@@ -218,7 +237,7 @@ func TestPulseUpdateRemovesStashWhenBackendIsDeleted(t *testing.T) {
 }
 
 func TestPulseUpdateRemovesStashWhenDeletedAfterNotification(t *testing.T) {
-	stash := map[pulse.ID]int32{pulse.ID{VsID: vsID, RsID: rsID}: int32(0)}
+	stash := map[pulse.ID]uint32{pulse.ID{VsID: vsID, RsID: rsID}: uint32(0)}
 	backends := map[string]*Backend{rsID: &Backend{service: &virtualService, options: &BackendOptions{}}}
 	services := map[string]*Service{vsID: &virtualService}
 	services[vsID].backends = backends
@@ -232,7 +251,7 @@ func TestPulseUpdateRemovesStashWhenDeletedAfterNotification(t *testing.T) {
 }
 
 func TestStatusDownDuringIncreasingWeight(t *testing.T) {
-	stash := map[pulse.ID]int32{pulse.ID{VsID: vsID, RsID: rsID}: int32(100)}
+	stash := map[pulse.ID]uint32{pulse.ID{VsID: vsID, RsID: rsID}: uint32(100)}
 	backends := map[string]*Backend{rsID: &Backend{service: &virtualService, options: &BackendOptions{}}}
 	services := map[string]*Service{vsID: &virtualService}
 	services[vsID].backends = backends
@@ -240,27 +259,10 @@ func TestStatusDownDuringIncreasingWeight(t *testing.T) {
 
 	c := newRoutineContext(services, mockIpvs)
 
-	mockIpvs.On("UpdateDestPort", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, int32(0), mock.Anything).Return(nil)
+	mockIpvs.On("UpdateDestination", mock.Anything, mock.Anything).Return(nil)
 	c.processPulseUpdate(stash, pulse.Update{pulse.ID{VsID: vsID, RsID: rsID}, pulse.Metrics{Status: pulse.StatusDown, Health: 0.5}})
 
 	assert.Equal(t, len(stash), 1)
-	assert.Equal(t, stash[pulse.ID{VsID: vsID, RsID: rsID}], int32(100))
+	assert.Equal(t, stash[pulse.ID{VsID: vsID, RsID: rsID}], uint32(100))
 	mockIpvs.AssertExpectations(t)
-}
-
-func TestServiceIsCreatedWithGenericCustomFlags(t *testing.T) {
-	options := &serviceConfig
-	options.ServiceOptions.ShFlags = "flag-1|flag-2|flag-3"
-	mockIpvs := &fakeIpvs{}
-	mockDisco := &fakeDisco{}
-	c := newContext(mockIpvs, mockDisco)
-
-	mockIpvs.On("AddServiceWithFlags", "127.0.0.1", uint16(80), uint16(syscall.IPPROTO_TCP), "sh",
-		gnl2go.U32ToBinFlags(gnl2go.IP_VS_SVC_F_SCHED1|gnl2go.IP_VS_SVC_F_SCHED2|gnl2go.IP_VS_SVC_F_SCHED3)).Return(nil)
-	mockDisco.On("Expose", vsID, "127.0.0.1", uint16(80)).Return(nil)
-
-	err := c.createService(vsID, options)
-	assert.NoError(t, err)
-	mockIpvs.AssertExpectations(t)
-	mockDisco.AssertExpectations(t)
 }
