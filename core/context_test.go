@@ -124,7 +124,7 @@ var (
 		Port:      serviceConfig.ServiceOptions.Port,
 		Netmask:   netmask.MaskFrom4([4]byte{255, 255, 255, 255}), // /32
 		Scheduler: serviceConfig.ServiceOptions.LbMethod,
-		Timeout:   0,
+		Timeout:   320,
 		Flags:     *new(ipvs.Flags),
 		Family:    ipvs.INET,
 		Protocol:  ipvs.TCP,
