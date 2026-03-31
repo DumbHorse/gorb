@@ -254,10 +254,7 @@ func (ctx *Context) createService(vsID string, serviceConfig *ServiceConfig) err
 		Protocol:  serviceOptions.protocol,
 	}
 
-	serviceExt, err := ctx.GetIpvsService(&svc)
-	//_, err := ctx.GetPoolForService(svc)
-	var ipvs_svc ipvs.Service
-	if err == nil {
+	if _, err := ctx.GetIpvsService(&svc); err == nil {
 		log.Infof("Service %s:%d already existed skip creation", svc.Address.String(), svc.Port)
 	} else {
 		log.Infof("Service %s:%d does not exist, create", svc.Address.String(), svc.Port)
@@ -265,17 +262,11 @@ func (ctx *Context) createService(vsID string, serviceConfig *ServiceConfig) err
 			log.Errorf("error while creating virtual service: %s", err)
 			return ErrIpvsSyscallFailed
 		}
-		ipvs_svc = serviceExt.Service
 	}
 
-	if !util.CompareSvc(ipvs_svc, svc) {
-		log.Debugf("Service [%s:%d] changed, update", svc.Address.String(), svc.Port)
-		if err := ctx.ipvs.UpdateService(svc); err != nil {
-			log.Errorf("error while updating virtual service: %s", err)
-		}
+	if _, ok := ctx.services[vsID]; !ok {
+		ctx.services[vsID] = &Service{vsID: vsID, options: serviceOptions, svc: svc, backends: make(map[string]*Backend)}
 	}
-
-	ctx.services[vsID] = &Service{vsID: vsID, options: serviceOptions, svc: svc, backends: make(map[string]*Backend)}
 
 	if err := ctx.disco.Expose(vsID, serviceOptions.host.String(), serviceOptions.Port); err != nil {
 		log.Errorf("error while exposing service to Disco: %s", err)
