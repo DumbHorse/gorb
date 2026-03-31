@@ -24,11 +24,12 @@ func (s *storeMock) mockNew() func(endpoints []string, options *store.Config) (s
 func TestMultipleURLs(t *testing.T) {
 	assert := assert.New(t)
 	m := storeMock{}
+	fake_ipvs := &fakeIpvs{}
 	libkv.AddStore("mock", m.mockNew())
 	m.On("List", "/").Return([]*store.KVPair{}, nil)
 
 	storeURLs := []string{"mock://127.0.0.1:2000", "mock://127.0.0.2:2001", "mock://127.0.0.3:2002"}
-	store, err := NewStore(storeURLs, "/", "/", 60, false, &Context{})
+	store, err := NewStore(storeURLs, "/", "/", 60, false, &Context{ipvs: fake_ipvs})
 
 	assert.NoError(err)
 	assert.Equal([]string{"127.0.0.1:2000", "127.0.0.2:2001", "127.0.0.3:2002"}, m.Endpoints)
