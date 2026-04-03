@@ -71,11 +71,16 @@ func (o *Options) Validate() error {
 	return nil
 }
 
+// Compare compares two Pulse options.
+// It is used to check if Pulse configuration has changed.
 func (o *Options) Compare(other *Options) bool {
 	if o.Type != other.Type {
 		return false
 	}
 	if o.Interval != other.Interval {
+		return false
+	}
+	if len(o.Args) != len(other.Args) {
 		return false
 	}
 	for k, v := range o.Args {
