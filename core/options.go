@@ -183,6 +183,8 @@ func (o *ServiceOptions) Validate(defaultHost netip.Addr) error {
 	return nil
 }
 
+// CompareStoreOptions compares two ServiceOptions.
+// It is used to check if Service configuration has changed.
 func (o *ServiceOptions) CompareStoreOptions(options *ServiceOptions) bool {
 	if o.Host != options.Host {
 		return false
@@ -258,6 +260,8 @@ func (o *BackendOptions) Validate(maxWeight uint32, port uint16) error {
 	return nil
 }
 
+// CompareStoreOptions compares two BackendOptions.
+// It is used to check if Backend configuration has changed.
 func (o *BackendOptions) CompareStoreOptions(options *BackendOptions) bool {
 	if o.Host != options.Host {
 		return false
