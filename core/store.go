@@ -244,6 +244,9 @@ func (s *Store) getStoreServices() (map[string]*ServiceConfig, error) {
 		if options.ServiceOptions == nil {
 			continue
 		} else {
+			if options.ServiceOptions.CommonName == "" {
+				options.ServiceOptions.CommonName = id
+			}
 			options.ServiceOptions.Validate(netip.Addr{})
 		}
 		services[id] = &options

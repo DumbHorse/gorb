@@ -213,6 +213,10 @@ func (ctx *Context) GetIpvsServiceBackends(svc *ipvs.Service) ([]ipvs.Destinatio
 // CreateService registers a new virtual service with IPVS.
 func (ctx *Context) createService(vsID string, serviceConfig *ServiceConfig) error {
 	serviceOptions := serviceConfig.ServiceOptions
+	if serviceOptions.CommonName == "" {
+		serviceOptions.CommonName = vsID
+	}
+
 	if err := serviceOptions.Validate(netip.MustParseAddr(ctx.endpoint.String())); err != nil {
 		return err
 	}

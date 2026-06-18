@@ -66,11 +66,12 @@ func (o *IPVSOptions) Compare(other *ipvs.Config) bool {
 // ServiceOptions describe a virtual service.
 type ServiceOptions struct {
 	//service settings
-	Host     string `json:"host" yaml:"host"`
-	Port     uint16 `json:"port" yaml:"port"`
-	Protocol string `json:"protocol" yaml:"protocol"`
-	LbMethod string `json:"lb_method" yaml:"lb_method"`
-	ShFlags  string `json:"sh_flags" yaml:"sh_flags"`
+	CommonName string `json:"common_name" yaml:"common_name"`
+	Host       string `json:"host" yaml:"host"`
+	Port       uint16 `json:"port" yaml:"port"`
+	Protocol   string `json:"protocol" yaml:"protocol"`
+	LbMethod   string `json:"lb_method" yaml:"lb_method"`
+	ShFlags    string `json:"sh_flags" yaml:"sh_flags"`
 
 	// Persistent service settings
 	Persistent bool   `json:"persistent" yaml:"persistent"`
@@ -186,6 +187,9 @@ func (o *ServiceOptions) Validate(defaultHost netip.Addr) error {
 // CompareStoreOptions compares two ServiceOptions.
 // It is used to check if Service configuration has changed.
 func (o *ServiceOptions) CompareStoreOptions(options *ServiceOptions) bool {
+	if o.CommonName != options.CommonName {
+		return false
+	}
 	if o.Host != options.Host {
 		return false
 	}
