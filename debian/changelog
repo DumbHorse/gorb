@@ -1,3 +1,10 @@
+
+gorb (0.5.1) unstable; urgency=medium
+
+  * Fix pulse options comparing 
+
+ -- Artem Aleksandrov <aaleksandrov@quantumbrains.com>  Mon, 03 Apr 2026 15:24:00 +0000
+
 gorb (0.5.0) unstable; urgency=medium
 
   * Change ipvs lib to cloudflare/ipvs
